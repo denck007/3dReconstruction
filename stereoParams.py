@@ -1,20 +1,19 @@
+import json
 
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import time
-
+image_scale = 0.25
 
 def nothing(x):
     pass
 def load_images():
-    scale = .25
 
-
-    image_left = cv2.imread("images/pineapple_left.jpg")
-    image_right = cv2.imread("images/pineapple_right.jpg")
-    image_left = cv2.resize(image_left,(0,0),fx=scale,fy=scale)
-    image_right = cv2.resize(image_right,(0,0),fx=scale,fy=scale)
+    image_left = cv2.imread("images/saw/saw_01.jpg")
+    image_right = cv2.imread("images/saw/saw_02.jpg")
+    image_left = cv2.resize(image_left,(0,0),fx=image_scale,fy=image_scale)
+    image_right = cv2.resize(image_right,(0,0),fx=image_scale,fy=image_scale)
     return image_left, image_right
 
 def homography(image_left, image_right):
@@ -50,6 +49,60 @@ def homography(image_left, image_right):
 
     return image_right_homography
 
+def stereo_rectification(left_gray,right_gray,parameters):
+
+    orb = cv2.ORB_create(nfeatures=1000)
+
+    kps1, descs1 = orb.detectAndCompute(left_gray,None)
+    kps2, descs2 = orb.detectAndCompute(right_gray,None)
+
+    MIN_MATCH_COUNT = 10
+    FLANN_INDEX_LSH = 6
+    index_params= dict(algorithm = FLANN_INDEX_LSH,
+                    table_number =12, # 12
+                    key_size = 10,     # 20
+                    multi_probe_level = 2) #2
+    search_params = {"checks":100}
+
+    flann = cv2.FlannBasedMatcher(index_params,search_params)
+    matches = flann.knnMatch(descs1, descs2, k=2)
+
+
+    good_matches = []
+    pts1 = []
+    pts2 = []
+    for i, (m,n) in enumerate(matches):
+        if m.distance < 0.9*n.distance:
+            good_matches.append(m)
+            pts2.append(kps2[m.trainIdx].pt)
+            pts1.append(kps1[m.queryIdx].pt)
+
+    # Get the all the intrinsic parameters
+    mtx = np.array(parameters['mtx'],dtype=np.float32)
+    newCameraMtx = np.array(parameters['newCameraMtx'],dtype=np.float32)
+    dist = np.array(parameters['dist'],dtype=np.float32)
+    roi = np.array(parameters['roi'],dtype=np.int32)
+    
+    # Now find the essential Matrix
+    pts1 = np.array(pts1,dtype=np.int32)
+    pts2 = np.array(pts2,dtype=np.int32)
+    E, mask = cv2.findEssentialMat(pts1, pts2, mtx, cv2.FM_LMEDS)
+    # We select only inlier points
+    pts1_inliers = pts1[mask.ravel()==1]
+    pts2_inliers = pts2[mask.ravel()==1]
+
+    retval, R, t, mask = cv2.recoverPose(E, pts1_inliers, pts2_inliers, mtx)
+
+    R1, R2, P1, P2, Q, validPixROI1, validPixROI2 = cv2.stereoRectify(mtx, dist, mtx, dist, (800,1000), R,t)
+
+    # Now correct the images
+    shape = (image_left.shape[1],image_left.shape[0])
+    mapx1,mapy1  = cv2.initUndistortRectifyMap(mtx, dist, R1, P1,shape, cv2.CV_32FC1)
+    mapx2,mapy2  = cv2.initUndistortRectifyMap(mtx, dist, R2, P2,shape, cv2.CV_32FC1)
+    image_left_rectified = cv2.remap(image_left,mapx1,mapy1,cv2.INTER_LINEAR)
+    image_right_rectified = cv2.remap(image_right,mapx2,mapy2,cv2.INTER_LINEAR)
+    
+    return image_left_rectified, image_right_rectified
 
 def compute_stereo(image_left,
                     image_right,
@@ -106,8 +159,8 @@ def update(_):
     speckleWindowSize = cv2.getTrackbarPos("speckleWindowSize","image")
     speckleRange = cv2.getTrackbarPos("speckleRange","image")
     
-    disparity = compute_stereo(left_gray, 
-                                    right_homography_gray,
+    disparity = compute_stereo(left_rectified, 
+                                    right_rectified,
                                     minDisparity=minDisparity,
                                     numDisparities=numDisparities,
                                     blockSize=blockSize,
@@ -123,25 +176,29 @@ def update(_):
     cv2.imshow('image',disparity)
 
 
+parameter_filename = f"camera_parameters_scale{image_scale:.4f}.json"
+with open(parameter_filename,'r') as fp:
+    parameters = json.load(fp)
 
 image_left, image_right = load_images()
 left_gray = cv2.cvtColor(image_left,cv2.COLOR_BGR2GRAY)
 right_gray = cv2.cvtColor(image_right,cv2.COLOR_BGR2GRAY)
-right_homography_gray = homography(left_gray, right_gray)
+left_rectified, right_rectified = stereo_rectification(left_gray, right_gray,parameters)
+#right_homography_gray = homography(left_gray, right_gray)
 
-disparity = compute_stereo(left_gray, right_homography_gray)
+disparity = compute_stereo(left_rectified, right_rectified)
 
 cv2.namedWindow('image')
 cv2.createTrackbar('minDisparity','image',1,255,update)
 cv2.createTrackbar('numDisparities','image',1,20,update)
 cv2.createTrackbar('blockSize','image',1,21,update)
-cv2.createTrackbar('P1','image',0,255,update)
-cv2.createTrackbar('P2','image',0,255,update)
-cv2.createTrackbar('disp12MaxDiff','image',-1,255,update)
+cv2.createTrackbar('P1','image',0,1500,update)
+cv2.createTrackbar('P2','image',0,1500,update)
+cv2.createTrackbar('disp12MaxDiff','image',-1,400,update)
 cv2.createTrackbar('preFilterCap','image',0,255,update)
 cv2.createTrackbar('uniquenessRatio','image',0,255,update)
-cv2.createTrackbar('speckleWindowSize','image',0,255,update)
-cv2.createTrackbar('speckleRange','image',1,6,update)
+cv2.createTrackbar('speckleWindowSize','image',0,500,update)
+cv2.createTrackbar('speckleRange','image',1,20,update)
 
 
 update(None)
